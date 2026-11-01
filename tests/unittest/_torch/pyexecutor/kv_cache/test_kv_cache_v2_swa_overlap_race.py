@@ -27,6 +27,7 @@ _BATCH = 4
 _TOKENS_PER_BLOCK = 16
 _TOKENS_PER_REQUEST = 5 * _TOKENS_PER_BLOCK
 _SLEEP_CYCLES = 2_000_000_000
+_STAGING_SOURCES = ("copy_idx", "scratch_metadata", "page_table")
 
 
 def _build_manager() -> KVCacheManagerV2:
@@ -78,8 +79,37 @@ def _empty_offsets(manager: KVCacheManagerV2) -> torch.Tensor:
     )
 
 
+def _copy_offsets(
+    manager: KVCacheManagerV2,
+    dst_tensor: torch.Tensor,
+    request_ids: list[int],
+    copy_idx: torch.Tensor,
+) -> None:
+    manager._copy_batch_block_offsets_per_layer(
+        dst_tensor,
+        request_ids,
+        copy_idx,
+        len(request_ids),
+        len(request_ids),
+    )
+
+
+def _overwrite_source(manager: KVCacheManagerV2, source: str, copy_idx: torch.Tensor) -> None:
+    if source == "copy_idx":
+        copy_idx.fill_(manager.max_batch_size - 1)
+    elif source == "scratch_metadata":
+        manager._host_scratch_begs_staging.fill_(777777)
+        manager._host_scratch_ends_staging.fill_(777777)
+        manager._host_scratch_slots_staging.fill_(777777)
+    elif source == "page_table":
+        manager.host_kv_cache_block_offsets.fill_(777777)
+    else:
+        raise AssertionError(f"Unknown staging source: {source}")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
-def test_swa_page_table_snapshot_survives_host_overwrite() -> None:
+@pytest.mark.parametrize("source", _STAGING_SOURCES)
+def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
     manager = _build_manager()
     request_ids = list(range(1, 1 + _BATCH))
 
@@ -88,31 +118,25 @@ def test_swa_page_table_snapshot_survives_host_overwrite() -> None:
             request_ids=request_ids,
             token_nums=[_TOKENS_PER_REQUEST] * _BATCH,
         )
+        assert any(
+            manager.kv_cache_map[request_id].get_scratch_desc(pool_id) is not None
+            for request_id in request_ids
+            for pool_id in range(manager.num_pools)
+        ), "test requires scratch metadata to exercise the per-layer path"
+        copy_idx = manager.index_mapper.get_copy_index(request_ids, _BATCH, 1).clone()
 
         baseline = _empty_offsets(manager)
         with torch.cuda.stream(manager._stream):
-            manager.copy_batch_block_offsets(
-                baseline,
-                request_ids,
-                1,
-                _BATCH,
-                _BATCH,
-            )
+            _copy_offsets(manager, baseline, request_ids, copy_idx)
         manager._stream.synchronize()
         baseline = baseline.clone()
 
         raced = _empty_offsets(manager)
         with torch.cuda.stream(manager._stream):
             torch.cuda._sleep(_SLEEP_CYCLES)
-            manager.copy_batch_block_offsets(
-                raced,
-                request_ids,
-                1,
-                _BATCH,
-                _BATCH,
-            )
+            _copy_offsets(manager, raced, request_ids, copy_idx)
 
-        manager.host_kv_cache_block_offsets.fill_(777777)
+        _overwrite_source(manager, source, copy_idx)
         manager._stream.synchronize()
 
         torch.testing.assert_close(raced, baseline)
