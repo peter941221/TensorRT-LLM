@@ -175,6 +175,8 @@ def test_swa_scratch_metadata_uses_fresh_host_snapshots(monkeypatch: pytest.Monk
         assert set(observed_sources) == {"begs", "ends", "slots"}
         assert observed_sources["begs"].data_ptr() != manager._host_scratch_begs_staging.data_ptr()
         assert observed_sources["ends"].data_ptr() != manager._host_scratch_ends_staging.data_ptr()
-        assert observed_sources["slots"].data_ptr() != manager._host_scratch_slots_staging.data_ptr()
+        assert (
+            observed_sources["slots"].data_ptr() != manager._host_scratch_slots_staging.data_ptr()
+        )
     finally:
         manager.shutdown()
