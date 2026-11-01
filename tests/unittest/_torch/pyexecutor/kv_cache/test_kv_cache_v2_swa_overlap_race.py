@@ -27,7 +27,7 @@ _BATCH = 4
 _TOKENS_PER_BLOCK = 16
 _TOKENS_PER_REQUEST = 5 * _TOKENS_PER_BLOCK
 _SLEEP_CYCLES = 2_000_000_000
-_STAGING_SOURCES = ("copy_idx", "scratch_metadata", "page_table")
+_STAGING_SOURCES = ("copy_idx", "page_table")
 
 
 def _build_manager() -> KVCacheManagerV2:
@@ -118,12 +118,7 @@ def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
             request_ids=request_ids,
             token_nums=[_TOKENS_PER_REQUEST] * _BATCH,
         )
-        assert any(
-            manager.kv_cache_map[request_id].get_scratch_desc(pool_id) is not None
-            for request_id in request_ids
-            for pool_id in range(manager.num_pools)
-        ), "test requires scratch metadata to exercise the per-layer path"
-        copy_idx = manager.index_mapper.get_copy_index(request_ids, _BATCH, 1).clone()
+        copy_idx = manager.index_mapper.get_copy_index(request_ids, _BATCH, 1)
 
         baseline = _empty_offsets(manager)
         with torch.cuda.stream(manager._stream):
@@ -140,5 +135,46 @@ def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
         manager._stream.synchronize()
 
         torch.testing.assert_close(raced, baseline)
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_swa_scratch_metadata_uses_fresh_host_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _build_manager()
+    request_ids = list(range(1, 1 + _BATCH))
+    observed_sources: dict[str, torch.Tensor] = {}
+    original_copy = torch.Tensor.copy_
+
+    def record_scratch_copy(
+        destination: torch.Tensor,
+        source: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        staging_targets = {
+            manager._device_scratch_begs_staging.data_ptr(): "begs",
+            manager._device_scratch_ends_staging.data_ptr(): "ends",
+            manager._device_scratch_slots_staging.data_ptr(): "slots",
+        }
+        source_name = staging_targets.get(destination.data_ptr())
+        if source_name is not None:
+            observed_sources[source_name] = source
+        return original_copy(destination, source, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", record_scratch_copy)
+    try:
+        manager.add_dummy_requests(
+            request_ids=request_ids,
+            token_nums=[_TOKENS_PER_REQUEST] * _BATCH,
+        )
+        with torch.cuda.stream(manager._stream):
+            manager._copy_scratch_metadata_to_device(request_ids, _BATCH)
+        manager._stream.synchronize()
+
+        assert set(observed_sources) == {"begs", "ends", "slots"}
+        assert observed_sources["begs"].data_ptr() != manager._host_scratch_begs_staging.data_ptr()
+        assert observed_sources["ends"].data_ptr() != manager._host_scratch_ends_staging.data_ptr()
+        assert observed_sources["slots"].data_ptr() != manager._host_scratch_slots_staging.data_ptr()
     finally:
         manager.shutdown()
