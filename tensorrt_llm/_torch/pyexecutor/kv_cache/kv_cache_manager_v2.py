@@ -3549,7 +3549,9 @@ class KVCacheManagerV2(BaseResourceManager):
     def _copy_idx_to_device(self, copy_idx: torch.Tensor) -> torch.Tensor:
         copy_idx_snapshot = torch.empty_like(copy_idx, pin_memory=prefer_pinned())
         copy_idx_snapshot.copy_(copy_idx)
-        self._device_copy_idx_staging[: copy_idx.size(0)].copy_(copy_idx_snapshot, non_blocking=True)
+        self._device_copy_idx_staging[: copy_idx.size(0)].copy_(
+            copy_idx_snapshot, non_blocking=True
+        )
         return self._device_copy_idx_staging
 
     def _copy_scratch_metadata_to_device(
