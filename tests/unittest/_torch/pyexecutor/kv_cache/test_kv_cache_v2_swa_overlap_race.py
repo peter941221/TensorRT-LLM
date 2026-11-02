@@ -131,6 +131,36 @@ def _queue_copy_behind_gate(
     return gate_stream
 
 
+def _assert_scratch_offset(
+    manager: KVCacheManagerV2,
+    offsets: torch.Tensor,
+    request_ids: list[int],
+) -> None:
+    for op_pool_idx in range(manager.num_attention_op_pools):
+        for role_idx in range(2):
+            pool_id = int(manager._device_attention_op_pool_ids[op_pool_idx, role_idx].item())
+            scale = int(manager._device_attention_op_scales[op_pool_idx, role_idx].item())
+            layer_offset = int(
+                manager._device_attention_op_layer_offsets[op_pool_idx, role_idx].item()
+            )
+            scratch_pages = int(
+                manager._device_attention_op_scratch_pages[op_pool_idx, role_idx].item()
+            )
+            for context_idx, request_id in enumerate(request_ids):
+                desc = manager.kv_cache_map[request_id].get_scratch_desc(pool_id)
+                if desc is None or not desc.slot_ids or desc.range.beg >= manager.max_blocks_per_seq:
+                    continue
+                block_position = desc.range.beg
+                total_offset = (block_position - desc.range.beg) * scratch_pages
+                slot_idx = total_offset // scale
+                if slot_idx >= len(desc.slot_ids):
+                    continue
+                expected = desc.slot_ids[slot_idx] * scale + (total_offset + layer_offset) % scale
+                assert offsets[op_pool_idx, context_idx, role_idx, block_position].item() == expected
+                return
+    raise AssertionError("No nonempty SWA scratch descriptor matched an output offset")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
 @pytest.mark.parametrize("source", _STAGING_SOURCES)
 def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
@@ -163,6 +193,8 @@ def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
         manager._stream.synchronize()
 
         assert torch.any(baseline != -12345)
+        if source == "scratch_metadata":
+            _assert_scratch_offset(manager, baseline, request_ids)
         torch.testing.assert_close(raced, baseline)
     finally:
         manager.shutdown()
