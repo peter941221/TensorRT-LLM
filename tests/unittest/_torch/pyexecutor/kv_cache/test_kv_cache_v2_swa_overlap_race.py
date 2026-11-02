@@ -148,7 +148,11 @@ def _assert_scratch_offset(
             )
             for context_idx, request_id in enumerate(request_ids):
                 desc = manager.kv_cache_map[request_id].get_scratch_desc(pool_id)
-                if desc is None or not desc.slot_ids or desc.range.beg >= manager.max_blocks_per_seq:
+                if (
+                    desc is None
+                    or not desc.slot_ids
+                    or desc.range.beg >= manager.max_blocks_per_seq
+                ):
                     continue
                 block_position = desc.range.beg
                 total_offset = (block_position - desc.range.beg) * scratch_pages
@@ -156,7 +160,9 @@ def _assert_scratch_offset(
                 if slot_idx >= len(desc.slot_ids):
                     continue
                 expected = desc.slot_ids[slot_idx] * scale + (total_offset + layer_offset) % scale
-                assert offsets[op_pool_idx, context_idx, role_idx, block_position].item() == expected
+                assert (
+                    offsets[op_pool_idx, context_idx, role_idx, block_position].item() == expected
+                )
                 return
     raise AssertionError("No nonempty SWA scratch descriptor matched an output offset")
 
