@@ -194,13 +194,22 @@ def test_swa_staging_snapshot_survives_host_overwrite(source: str) -> None:
 
         raced = _empty_offsets(manager)
         gate_stream = _queue_copy_behind_gate(manager, raced, request_ids, copy_idx)
+        second = None
+        second_request_ids = list(reversed(request_ids))
+        if source == "scratch_metadata":
+            second_copy_idx = manager.index_mapper.get_copy_index(second_request_ids, _BATCH, 1)
+            second = _empty_offsets(manager)
+            with torch.cuda.stream(manager._stream):
+                _copy_offsets(manager, second, second_request_ids, second_copy_idx)
         _overwrite_source(manager, source, copy_idx)
         gate_stream.synchronize()
         manager._stream.synchronize()
 
         assert torch.any(baseline != -12345)
         if source == "scratch_metadata":
+            assert second is not None and torch.any(second != -12345)
             _assert_scratch_offset(manager, baseline, request_ids)
+            _assert_scratch_offset(manager, second, second_request_ids)
         torch.testing.assert_close(raced, baseline)
     finally:
         manager.shutdown()
